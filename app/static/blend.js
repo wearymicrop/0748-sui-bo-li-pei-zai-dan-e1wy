@@ -84,6 +84,8 @@ async function refresh(id) {
     source = id;
     run = Object.fromEntries(parts.map((part, i) => [part, result[i]]));
     field("batch").textContent = `批次 ${run.weighing.batch}`;
+    if (!field("intake-batch").value)
+      field("intake-batch").value = run.weighing.batch;
     field("balance").textContent =
       run.reconcile.status === "MATCHED" ? "湿干双账已对平" : "湿干账有差异";
     options("lot", Object.keys(run.drymass.lots));
@@ -307,6 +309,163 @@ field("verify").onclick = async () => {
       `复算一致 · ${record.manifest.digest.slice(0, 12)}`;
   } catch (error) {
     field("receipt").textContent = error.message;
+  }
+};
+const shifted = (grams) => (grams > 0 ? "+" : "") + formatKg(grams);
+const labText = (row) => {
+  const codes = [row.moisture_code, row.grade_code].filter(Boolean);
+  return codes.length ? codes.map((code) => reasons[code]).join("·") : "齐";
+};
+const intakeText = (row) => {
+  const parts = [];
+  if (row.sections.tickets) parts.push(`磅单 ${row.sections.tickets}`);
+  if (row.sections.moisture) parts.push(`含水 ${row.sections.moisture}`);
+  if (row.sections.grades) parts.push(`分级 ${row.sections.grades}`);
+  if (row.sections.targets) parts.push(`目标 ${row.sections.targets}`);
+  if (row.closed) parts.push("封批");
+  return parts.join(" · ") || "—";
+};
+function renderIntake(data) {
+  const t = data.totals;
+  const status = [
+    data.closed ? "已封批" : "未封批",
+    data.complete
+      ? "齐全可发布"
+      : `待齐全${data.pending_lots ? `（${data.pending_lots} 批待化验）` : ""}${
+          data.isolated ? `（${data.isolated} 条隔离）` : ""
+        }`,
+    data.published
+      ? `已发布 #${data.published.seq}${
+          data.published.stale ? "（后到证据未发布）" : ""
+        }`
+      : "尚未发布",
+  ];
+  field("intake-status").textContent = status.join(" · ");
+  const tags = item("div", undefined, "labels");
+  for (const row of data.targets)
+    tags.append(
+      item(
+        "span",
+        `${row.target} · 已配 ${formatKg(row.loaded_g)}/${formatKg(
+          row.target_g,
+        )} kg${row.short_g ? ` · 欠 ${formatKg(row.short_g)}` : ""}`,
+        "square" + (row.short_g ? " warning" : ""),
+      ),
+    );
+  field("intake-targets").replaceChildren(data.targets.length ? tags : "");
+  field("intake-summary").replaceChildren(
+    stats([
+      ["到货湿重 kg", formatKg(t.arrived_wet_g)],
+      ["暂定可装 kg", formatKg(t.provisional_dry_g)],
+      ["待化验 kg", formatKg(t.pending_wet_g)],
+      ["暂定配载 kg", formatKg(t.allocated_dry_g)],
+      [data.complete ? "正式余料 kg" : "暂定余料 kg", formatKg(t.remaining_g)],
+    ]),
+  );
+  field("intake-lots").replaceChildren(
+    ledger(
+      [
+        "批料",
+        "来源回传",
+        "到货湿重 kg",
+        "化验",
+        "暂定可装 kg",
+        "待化验 kg",
+        "已配载 kg",
+        "余料 kg",
+      ],
+      data.lots.map((row) => [
+        row.lot,
+        row.intakes.map((seq) => `#${seq}`).join(" "),
+        formatKg(row.arrived_wet_g),
+        labText(row),
+        formatKg(row.provisional_dry_g),
+        formatKg(row.pending_wet_g),
+        formatKg(row.allocated_dry_g),
+        formatKg(row.remaining_g),
+      ]),
+    ),
+  );
+  field("intake-log").replaceChildren(
+    ledger(
+      [
+        "回传",
+        "标识",
+        "携带",
+        "Δ到货 kg",
+        "Δ暂定可装 kg",
+        "Δ待化验 kg",
+        "Δ配载 kg",
+        "Δ余料 kg",
+      ],
+      data.intakes.map((row) => [
+        `#${row.seq}`,
+        row.id.slice(3, 11),
+        intakeText(row),
+        shifted(row.delta.arrived_wet_g),
+        shifted(row.delta.provisional_dry_g),
+        shifted(row.delta.pending_wet_g),
+        shifted(row.delta.allocated_dry_g),
+        shifted(row.delta.remaining_g),
+      ]),
+    ),
+  );
+}
+function clearIntake(message) {
+  field("intake-status").textContent = message || "";
+  for (const id of ["intake-targets", "intake-summary", "intake-lots", "intake-log"])
+    field(id).replaceChildren();
+}
+async function loadIntake(batch) {
+  try {
+    renderIntake(
+      await read(`/api/batches/${encodeURIComponent(batch)}/ledger`),
+    );
+  } catch (error) {
+    clearIntake(error.message);
+  }
+}
+field("intake-batch").onchange = (event) => {
+  const batch = event.target.value.trim();
+  if (batch) loadIntake(batch);
+  else clearIntake();
+};
+field("intake-file").onchange = async (event) => {
+  const file = event.target.files[0];
+  const batch = field("intake-batch").value.trim();
+  try {
+    if (!file) return;
+    if (!batch) throw Error("请先填写批次号再导入回传");
+    const data = await read(
+      `/api/batches/${encodeURIComponent(batch)}/intakes`,
+      { method: "POST", body: file },
+    );
+    renderIntake(data.ledger);
+    if (data.reused)
+      field("intake-status").textContent += " · 重复回传已归并，未新增接收量";
+  } catch (error) {
+    field("intake-status").textContent = error.message;
+  } finally {
+    event.target.value = "";
+  }
+};
+field("publish").onclick = async () => {
+  const batch = field("intake-batch").value.trim();
+  if (!batch) {
+    field("intake-status").textContent = "请先填写批次号";
+    return;
+  }
+  try {
+    const snapshot = await read(
+      `/api/batches/${encodeURIComponent(batch)}/publish`,
+      { method: "POST" },
+    );
+    await loadIntake(batch);
+    field("intake-status").textContent = `已发布正式余料 ${formatKg(
+      snapshot.ledger.official_remaining_g,
+    )} kg · #${snapshot.seq}`;
+  } catch (error) {
+    field("intake-status").textContent = `${error.message}，保留上一可核对状态`;
   }
 };
 refresh(source);

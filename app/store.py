@@ -14,6 +14,18 @@ class Ledger:
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS sources (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS intakes (
+                    batch TEXT NOT NULL,
+                    id TEXT NOT NULL,
+                    seq INTEGER NOT NULL,
+                    payload TEXT NOT NULL,
+                    PRIMARY KEY (batch, id)
+                );
+                CREATE TABLE IF NOT EXISTS publications (
+                    batch TEXT PRIMARY KEY,
+                    seq INTEGER NOT NULL,
+                    payload TEXT NOT NULL
+                );
             """)
 
     @contextmanager
@@ -58,3 +70,43 @@ class Ledger:
                 (payload["id"], canonical(payload)),
             )
             return cursor.rowcount == 0
+
+    def put_intake(self, batch, identifier, payload):
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO intakes (batch, id, seq, payload)
+                SELECT ?, ?, COALESCE(MAX(seq), 0) + 1, ? FROM intakes WHERE batch = ?
+                """,
+                (batch, identifier, canonical(payload), batch),
+            )
+            row = conn.execute(
+                "SELECT seq FROM intakes WHERE batch = ? AND id = ?",
+                (batch, identifier),
+            ).fetchone()
+            return cursor.rowcount == 0, row[0]
+
+    def intakes(self, batch):
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT id, seq, payload FROM intakes WHERE batch = ? ORDER BY seq",
+                (batch,),
+            ).fetchall()
+        return [
+            {"id": identifier, "seq": seq, "payload": json.loads(payload)}
+            for identifier, seq, payload in rows
+        ]
+
+    def publication(self, batch):
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT payload FROM publications WHERE batch = ?", (batch,)
+            ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def put_publication(self, batch, seq, payload):
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO publications VALUES (?, ?, ?)",
+                (batch, seq, canonical(payload)),
+            )

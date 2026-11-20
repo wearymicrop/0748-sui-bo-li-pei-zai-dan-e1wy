@@ -195,6 +195,10 @@ td.num { text-align: end; }
 #closure button { background: #ead59a; border-color: #846625; }
 #receipt { color: var(--measured); overflow-wrap: anywhere; }
 #actions a { color: var(--oxide); }
+#intake-controls { display: flex; flex-wrap: wrap; gap: 7px; align-items: baseline; margin-block-end: 10px; }
+#intake-controls input { width: 150px; margin-inline-start: 4px; }
+#intake-status { color: var(--measured); overflow-wrap: anywhere; }
+#intake-lots { margin-block-end: 8px; }
 .statusbar {
   display: flex;
   justify-content: space-between;
